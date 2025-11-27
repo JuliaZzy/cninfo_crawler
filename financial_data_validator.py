@@ -19,9 +19,12 @@ import time
 import sys
 from datetime import datetime, timedelta
 import warnings
+from pathlib import Path
 
 # 抑制警告信息
 warnings.filterwarnings("ignore")
+
+OUTPUT_FILENAME = Path("financial_data_validator.csv")
 
 
 def validate_pdf_access(announcement_info, session, headers):
@@ -417,14 +420,8 @@ def main():
         # 确保列顺序：股票代码、公司名称、财报名称、报告日期、PDF链接
         df = df[['股票代码', '公司名称', '财报名称', '报告日期', 'PDF链接']]
         
-        output_filename = 'financial_data_validator.csv'
-        # 如果文件已存在，先删除
-        if os.path.exists(output_filename):
-            os.remove(output_filename)
-            print(f"已删除旧的 {output_filename} 文件")
-        
-        df.to_csv(output_filename, index=False, encoding='utf-8-sig')
-        print(f"CSV报告生成完毕！已保存为 ./{output_filename}")
+        df.to_csv(OUTPUT_FILENAME, index=False, encoding='utf-8-sig')
+        print(f"CSV报告生成完毕！已保存为 ./{OUTPUT_FILENAME.name}")
         print(f"共 {len(df)} 条记录")
     else:
         print("未找到可访问的PDF，不生成CSV文件。")

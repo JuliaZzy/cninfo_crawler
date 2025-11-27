@@ -13,6 +13,9 @@ import re
 import pandas as pd
 import time
 from datetime import datetime, timedelta
+from pathlib import Path
+
+OUTPUT_FILENAME = Path("bilibili_crawler.csv")
 
 #定义一个访问接口的函数
 def get_report(page_num, date, exchange_column="szse", plate=""):
@@ -360,9 +363,8 @@ def main(target_year=2025):
     # 保存CSV文件
     if processed_data:
         df = pd.DataFrame(processed_data)
-        output_filename = f"bilibili_crawler.csv"
-        df.to_csv(output_filename, index=False, encoding='utf-8-sig')
-        print(f"\nCSV文件已保存: {output_filename}")
+        df.to_csv(OUTPUT_FILENAME, index=False, encoding='utf-8-sig')
+        print(f"\nCSV文件已保存: {OUTPUT_FILENAME.name}")
         print(f"共处理 {len(processed_data)} 条有效数据")
     else:
         print("\n未找到有效数据，不生成CSV文件")
