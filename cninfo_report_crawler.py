@@ -1,22 +1,18 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-财务数据验证器 - 快速验证财报PDF是否可访问
+巨潮信息网财报数据爬虫
 功能：
-1. 快速检查财报PDF是否可以成功下载
-2. 不保存PDF文件，不解析PDF内容
-3. 输出包含股票代码、公司名称、财报名称、报告日期、PDF链接的CSV文件
-
-用途：快速验证爬取的数据是否准确，无需完整下载和解析
+1. 爬取巨潮信息网指定日期范围内的财报数据
+2. 输出包含股票代码、公司名称、财报名称、报告日期、PDF链接的CSV文件
 """
 
-import os
-import re
+import argparse
 import requests
 import pandas as pd
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from functools import partial
 import time
-import sys
 from datetime import datetime, timedelta
 import warnings
 from pathlib import Path
@@ -24,10 +20,40 @@ from pathlib import Path
 # 抑制警告信息
 warnings.filterwarnings("ignore")
 
-OUTPUT_FILENAME = Path("financial_data_validator.csv")
+# 报告类型映射
+REPORT_TYPE_MAP = {
+    "yjdbg": {"category": "category_yjdbg_szsh", "label": "一季度"},
+    "bndbg": {"category": "category_bndbg_szsh", "label": "半年报"},
+    "sjdbg": {"category": "category_sjdbg_szsh", "label": "三季度"},
+    "ndbg": {"category": "category_ndbg_szsh", "label": "年报"},
+}
 
 
-def validate_pdf_access(announcement_info, session, headers):
+def parse_args():
+    parser = argparse.ArgumentParser(description="财务数据验证器 - 支持日期范围和报告类型参数")
+    parser.add_argument(
+        "--start-date",
+        type=str,
+        required=True,
+        help="开始日期，格式：YYYY-MM-DD，例如：2025-08-01",
+    )
+    parser.add_argument(
+        "--end-date",
+        type=str,
+        required=True,
+        help="结束日期，格式：YYYY-MM-DD，例如：2025-08-31",
+    )
+    parser.add_argument(
+        "--report-type",
+        type=str,
+        required=True,
+        choices=REPORT_TYPE_MAP.keys(),
+        help="报告类型：yjdbg=一季度, bndbg=半年报, sjdbg=三季度, ndbg=年报",
+    )
+    return parser.parse_args()
+
+
+def validate_pdf_access(announcement_info, session, headers, target_years):
     """
     快速验证PDF是否可以访问（只检查响应头，不下载完整文件）
     
@@ -35,13 +61,15 @@ def validate_pdf_access(announcement_info, session, headers):
         announcement_info (dict): 公告信息
         session (requests.Session): 请求会话
         headers (dict): 请求头
+        target_years (list): 目标年份列表，用于检查财报标题是否包含这些年份
     
     Returns:
         dict or None: 如果PDF可访问，返回包含股票代码、公司名称、财报名称、报告日期、PDF链接的字典；否则返回None
     """
     file_url = 'https://static.cninfo.com.cn/' + announcement_info['adjunctUrl']
     sec_name = announcement_info.get('secName', '未知公司')
-    sec_code = announcement_info.get('secCode', '未知代码')
+    raw_sec_code = announcement_info.get('secCode', '未知代码')
+    sec_code = raw_sec_code
     announcement_title = announcement_info.get('announcementTitle', '未知报告')
     announcement_time = announcement_info.get('announcementTime', '')
     
@@ -66,21 +94,24 @@ def validate_pdf_access(announcement_info, session, headers):
             sec_code = sec_code_str + '.SH'  # 上交所
         elif sec_code_str.startswith('00') or sec_code_str.startswith('30'):
             sec_code = sec_code_str + '.SZ'  # 深交所
-        elif sec_code_str.startswith('83') or sec_code_str.startswith('87') or sec_code_str.startswith('92'):
+        elif (
+            sec_code_str.startswith('83')
+            or sec_code_str.startswith('87')
+            or sec_code_str.startswith('92')
+            or sec_code_str.startswith('43')
+        ):
             sec_code = sec_code_str + '.BJ'  # 北交所
         else:
             sec_code = sec_code_str  # 保持原样
     
-    # 过滤：排除包含"摘要"的报告
-    if '摘要' in announcement_title:
-        return None
+    # 过滤：检查财报名称是否包含目标年份
+    if target_years:
+        year_found = any(str(year) in announcement_title for year in target_years)
+        if not year_found:
+            return None
     
-    # 过滤：排除包含"英文版"的报告
-    if '英文版' in announcement_title:
-        return None
-    
-    # 过滤：财报名称必须包含"2025"
-    if '2025' not in announcement_title:
+    # 过滤：排除包含摘要/英文版的报告
+    if ('摘要' in announcement_title) or ('英文版' in announcement_title):
         return None
     
     try:
@@ -190,14 +221,21 @@ def get_announcements_multi_api(session, headers, exchange, date_str, report_cat
                     # 获取总页数（第一次请求时）
                     if total_pages is None and isinstance(data, dict):
                         total_pages = data.get('totalpages', 0)
-                        if total_pages > 0:
-                            print(f"\n  共 {total_pages} 页数据")
+                        announcements_in_response = data.get('announcements', [])
+
+                        # 检查是否有数据：totalpages > 0 或者 announcements 不为空
+                        if total_pages > 0 or announcements_in_response:
+                            if total_pages > 0:
+                                print(f"\n  共 {total_pages} 页数据")
+                            else:
+                                # totalpages为0但announcements有数据的情况
+                                print(f"\n  API返回数据 {len(announcements_in_response)} 条（totalpages=0）")
                         else:
                             print(f"\n  无数据")
                             break
                     
                     # 检查是否超过总页数（更严格的停止条件）
-                    if total_pages:
+                    if total_pages and total_pages > 0:  # 只有当total_pages > 0时才检查超限
                         if page_num > total_pages + 3:
                             # 超过总页数3页后强制停止
                             print(f"\n  已超过总页数 {total_pages} 页，强制停止（当前第 {page_num} 页）")
@@ -206,11 +244,20 @@ def get_announcements_multi_api(session, headers, exchange, date_str, report_cat
                             # 超过总页数且连续2页无有效数据，立即停止
                             print(f"\n  已超过总页数 {total_pages} 且连续 {empty_pages_count} 页无有效数据，停止查询")
                             break
+                    elif total_pages == 0 and page_num > 1:
+                        # total_pages为0时，只处理第1页，之后停止
+                        print(f"\n  total_pages为0，只处理第1页，停止查询")
+                        break
                     
                     # 添加最大页数限制，防止无限循环（安全措施）
                     max_pages_limit = 500
                     if page_num > max_pages_limit:
                         print(f"\n  达到最大页数限制 {max_pages_limit}，强制停止")
+                        break
+
+                    # 当total_pages为0时，只处理第1页
+                    if total_pages == 0 and page_num > 1:
+                        print(f"\n  total_pages为0，已处理完第1页，停止查询")
                         break
                     
                     # 处理不同的响应格式
@@ -288,21 +335,71 @@ def get_announcements_multi_api(session, headers, exchange, date_str, report_cat
     return all_announcements
 
 
-def main():
+def main(start_date_str: str, end_date_str: str, report_type: str):
     """
     主函数 - 快速验证财报PDF可访问性
+    
+    Args:
+        start_date_str: 开始日期字符串，格式：YYYY-MM-DD
+        end_date_str: 结束日期字符串，格式：YYYY-MM-DD
+        report_type: 报告类型，可选值：yjdbg, bndbg, sjdbg, ndbg
     """
+    # 验证报告类型
+    if report_type not in REPORT_TYPE_MAP:
+        raise ValueError(f"不支持的报告类型：{report_type}，可选值：{list(REPORT_TYPE_MAP.keys())}")
+    
+    # 解析日期
+    try:
+        start_date = datetime.strptime(start_date_str, "%Y-%m-%d")
+        end_date = datetime.strptime(end_date_str, "%Y-%m-%d")
+    except ValueError as e:
+        raise ValueError(f"日期格式错误，请使用 YYYY-MM-DD 格式：{e}")
+    
+    if start_date > end_date:
+        raise ValueError(f"开始日期 {start_date_str} 不能晚于结束日期 {end_date_str}")
+    
+    # 获取报告类别和标签
+    report_config = REPORT_TYPE_MAP[report_type]
+    report_category = report_config["category"]
+    report_label = report_config["label"]
+    
+    # 生成日期列表
+    date_list = [(start_date + timedelta(days=i)).strftime("%Y-%m-%d") 
+                 for i in range((end_date - start_date).days + 1)]
+
+    # 提取日期范围内的所有年份（用于年份检查）
+    # 逻辑：将日期整体后移3个月后取年份
+    # 例如：2025-04-01到2026-03-31之间，减去3个月后是2025-01-01到2025-12-31，检查2025
+    # 例如：2025-07-01到2025-09-30之间，减去3个月后是2025-04-01到2025-06-30，检查2025
+    
+    def subtract_3_months(date):
+        """将日期减去3个月"""
+        month = date.month - 3
+        year = date.year
+        if month <= 0:
+            month += 12
+            year -= 1
+        return datetime(year, month, date.day)
+    
+    # 将开始和结束日期都减去3个月
+    start_date_shifted = subtract_3_months(start_date)
+    end_date_shifted = subtract_3_months(end_date)
+    
+    # 提取减去3个月后的年份范围
+    target_years = list(set([start_date_shifted.year, end_date_shifted.year]))
+    if end_date_shifted.year > start_date_shifted.year:
+        target_years = list(range(start_date_shifted.year, end_date_shifted.year + 1))
+
+    # 生成动态输出文件名：listed_companies_{start_date}_{end_date}_{report_type}_{timestamp}.csv
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    OUTPUT_FILENAME = Path(f"listed_companies_{start_date_str.replace('-', '')}_{end_date_str.replace('-', '')}_{report_type}_{timestamp}.csv")
+
     print("=" * 60)
     print("财务数据验证器 - 快速验证财报PDF可访问性")
     print("=" * 60)
     
-    # 配置参数（可以在这里修改）
-    start_date = datetime(2025, 6, 30)  # 开始日期
-    end_date = datetime(2025, 10, 1)    # 结束日期
-    report_category = 'category_bndbg_szsh'  # 半年报
-    
     print(f"时间范围: {start_date.strftime('%Y-%m-%d')} 到 {end_date.strftime('%Y-%m-%d')}")
-    print(f"报告类型: 半年报")
+    print(f"报告类型: {report_label}")
     print("=" * 60)
     
     session = requests.Session()
@@ -340,10 +437,6 @@ def main():
     total_announcements = 0
     total_valid = 0
     
-    # 生成日期列表（按天）
-    date_list = [(start_date + timedelta(days=i)).strftime("%Y-%m-%d") 
-                 for i in range((end_date - start_date).days + 1)]
-    
     # 遍历每个交易所
     for exchange in exchanges:
         print(f"\n{'='*50}")
@@ -375,8 +468,10 @@ def main():
             
             # 使用线程池并发验证（提高速度）
             with ThreadPoolExecutor(max_workers=10) as executor:
+                # 使用 partial 传递 target_years 参数
+                validate_func = partial(validate_pdf_access, session=session, headers=headers, target_years=target_years)
                 future_to_info = {
-                    executor.submit(validate_pdf_access, ann, session, headers): ann 
+                    executor.submit(validate_func, ann): ann 
                     for ann in announcements
                 }
                 for future in as_completed(future_to_info):
@@ -410,12 +505,22 @@ def main():
     if all_valid_reports:
         df = pd.DataFrame(all_valid_reports)
         
-        # 去重处理
-        print("正在进行数据去重...")
+        # 去掉摘要/英文版
         original_count = len(df)
+        df = df[~df['财报名称'].str.contains('摘要|英文版', na=False)].copy()
+        after_filter = len(df)
+        print(f"已剔除摘要/英文版，共移除 {original_count - after_filter} 条记录")
+
+        print("正在进行数据去重...")
         df = df.drop_duplicates(subset=['股票代码', '公司名称', '财报名称'], keep='first')
+
+        # 按日期保留每个代码最新的一条
+        df['_parsed_date'] = pd.to_datetime(df['报告日期'], errors='coerce')
+        df = df.sort_values(by=['股票代码', '_parsed_date'], ascending=[True, False])
+        df = df.drop_duplicates(subset=['股票代码'], keep='first')
+        df = df.drop(columns=['_parsed_date'])
         final_count = len(df)
-        print(f"去重前: {original_count} 行，去重后: {final_count} 行")
+        print(f"最终保留 {final_count} 条（每个股票代码保留最新一条）")
         
         # 确保列顺序：股票代码、公司名称、财报名称、报告日期、PDF链接
         df = df[['股票代码', '公司名称', '财报名称', '报告日期', 'PDF链接']]
@@ -432,8 +537,9 @@ def main():
 
 
 if __name__ == "__main__":
+    args = parse_args()
     try:
-        main()
+        main(args.start_date, args.end_date, args.report_type)
     except KeyboardInterrupt:
         print("\n\n程序被用户中断")
     except Exception as e:
