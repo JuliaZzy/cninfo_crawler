@@ -268,6 +268,16 @@ def parse_args():
         default=None,
         help="指定CSV文件路径（可选）。如果不指定，将自动查找最新的listed_companies_*.csv文件"
     )
+    parser.add_argument(
+        "--no-download",
+        action="store_true",
+        help="不下载PDF文件，仅解析数据生成Excel（快速模式）。如果未指定此参数，程序会询问是否下载"
+    )
+    parser.add_argument(
+        "--download-pdf",
+        action="store_true",
+        help="下载PDF文件到本地（完整模式）。如果未指定此参数，程序会询问是否下载"
+    )
     return parser.parse_args()
 
 
@@ -430,25 +440,33 @@ def main():
     # 解析命令行参数
     args = parse_args()
     
-    # 询问是否下载PDF
-    print("\n" + "="*60)
-    print("是否下载PDF文件到本地？")
-    print("y - 下载PDF并生成Excel（完整模式）")
-    print("n - 仅生成Excel数据（快速模式，不下载PDF）")
-    print("="*60)
-    
-    while True:
-        choice = input("请输入选择 (y/n): ").strip().lower()
-        if choice == 'y':
-            download_pdf = True
-            print("✅ 已选择：下载PDF并生成Excel（完整模式）")
-            break
-        elif choice == 'n':
-            download_pdf = False
-            print("✅ 已选择：仅生成Excel数据（快速模式）")
-            break
-        else:
-            print("❌ 无效选择，请输入 y 或 n")
+    # 根据命令行参数决定是否下载PDF
+    if args.no_download:
+        download_pdf = False
+        print("\n✅ 已通过命令行参数设置：仅生成Excel数据（快速模式，不下载PDF）")
+    elif args.download_pdf:
+        download_pdf = True
+        print("\n✅ 已通过命令行参数设置：下载PDF并生成Excel（完整模式）")
+    else:
+        # 询问是否下载PDF
+        print("\n" + "="*60)
+        print("是否下载PDF文件到本地？")
+        print("y - 下载PDF并生成Excel（完整模式）")
+        print("n - 仅生成Excel数据（快速模式，不下载PDF）")
+        print("="*60)
+        
+        while True:
+            choice = input("请输入选择 (y/n): ").strip().lower()
+            if choice == 'y':
+                download_pdf = True
+                print("✅ 已选择：下载PDF并生成Excel（完整模式）")
+                break
+            elif choice == 'n':
+                download_pdf = False
+                print("✅ 已选择：仅生成Excel数据（快速模式）")
+                break
+            else:
+                print("❌ 无效选择，请输入 y 或 n")
     
     print(f"\n📁 PDF下载模式: {'开启' if download_pdf else '关闭'}")
     if not download_pdf:
@@ -585,8 +603,11 @@ if __name__ == "__main__":
     print("输出：生成长格式和宽格式的Excel报告")
     print("=" * 60)
     print("使用方法：")
-    print("  python report_info_collection.py                    # 自动查找最新的CSV文件")
-    print("  python report_info_collection.py --csv-file file.csv # 指定CSV文件")
+    print("  python report_info_collection.py                              # 自动查找最新的CSV文件，会询问是否下载PDF")
+    print("  python report_info_collection.py --csv-file file.csv          # 指定CSV文件，会询问是否下载PDF")
+    print("  python report_info_collection.py --no-download                 # 不下载PDF，仅解析数据（快速模式）")
+    print("  python report_info_collection.py --download-pdf                # 下载PDF到本地（完整模式）")
+    print("  python report_info_collection.py --csv-file file.csv --no-download  # 指定CSV文件且不下载PDF")
     print("=" * 60)
     
     try:
