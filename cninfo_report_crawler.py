@@ -30,7 +30,7 @@ REPORT_TYPE_MAP = {
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="财务数据验证器 - 支持日期范围和报告类型参数")
+    parser = argparse.ArgumentParser(description="巨潮信息网财报数据爬虫 - 支持日期范围和报告类型参数")
     parser.add_argument(
         "--start-date",
         type=str,
@@ -55,7 +55,7 @@ def parse_args():
 
 def validate_pdf_access(announcement_info, session, headers, target_years):
     """
-    快速验证PDF是否可以访问（只检查响应头，不下载完整文件）
+    验证PDF是否可以访问
     
     Args:
         announcement_info (dict): 公告信息
@@ -90,19 +90,23 @@ def validate_pdf_access(announcement_info, session, headers, target_years):
             sec_code_str = sec_code_str.zfill(6)  # 补齐到6位，如 1 -> 000001
         
         # 添加交易所后缀
+        # 上交所
         if sec_code_str.startswith('60') or sec_code_str.startswith('68'):
-            sec_code = sec_code_str + '.SH'  # 上交所
+            sec_code = sec_code_str + '.SH'
+        # 深交所
         elif sec_code_str.startswith('00') or sec_code_str.startswith('30'):
-            sec_code = sec_code_str + '.SZ'  # 深交所
+            sec_code = sec_code_str + '.SZ'  
+        # 北交所
         elif (
             sec_code_str.startswith('83')
             or sec_code_str.startswith('87')
             or sec_code_str.startswith('92')
             or sec_code_str.startswith('43')
         ):
-            sec_code = sec_code_str + '.BJ'  # 北交所
+            sec_code = sec_code_str + '.BJ'  
+        # 其他：暂时保持不变
         else:
-            sec_code = sec_code_str  # 保持原样
+            sec_code = sec_code_str
     
     # 过滤：标题含目标年份或标题不含任何数字
     # 检查标题是否包含数字
@@ -122,7 +126,7 @@ def validate_pdf_access(announcement_info, session, headers, target_years):
         return None
     
     try:
-        # 使用HEAD请求快速检查文件是否存在（更快）
+        # 使用HEAD请求快速检查文件是否存在
         # 如果HEAD不支持，则使用GET但只读取少量字节
         try:
             response = session.head(file_url, headers=headers, timeout=10, allow_redirects=True)
@@ -176,7 +180,7 @@ def get_announcements_multi_api(session, headers, exchange, date_str, report_cat
         list: 公告列表
     """
     all_announcements = []
-    seen_announcements = set()  # 用于去重
+    seen_announcements = set()
     
     for api_url in api_urls:
         for report_category in report_categories:
@@ -376,8 +380,6 @@ def main(start_date_str: str, end_date_str: str, report_type: str):
 
     # 提取日期范围内的所有年份（用于年份检查）
     # 逻辑：将日期整体后移3个月后取年份
-    # 例如：2025-04-01到2026-03-31之间，减去3个月后是2025-01-01到2025-12-31，检查2025
-    # 例如：2025-07-01到2025-09-30之间，减去3个月后是2025-04-01到2025-06-30，检查2025
     
     def subtract_3_months(date):
         """将日期减去3个月"""
