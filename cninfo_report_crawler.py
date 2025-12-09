@@ -104,11 +104,18 @@ def validate_pdf_access(announcement_info, session, headers, target_years):
         else:
             sec_code = sec_code_str  # 保持原样
     
-    # 过滤：检查财报名称是否包含目标年份
+    # 过滤：标题含目标年份或标题不含任何数字
+    # 检查标题是否包含数字
+    has_digit = bool(re.search(r'\d', announcement_title))
+    # 检查标题是否包含目标年份中的任何年份
     if target_years:
         year_found = any(str(year) in announcement_title for year in target_years)
-        if not year_found:
-            return None
+    else:
+        year_found = False
+    
+    # 新逻辑：标题含目标年份或标题不含任何数字
+    if not (year_found or not has_digit):
+        return None
     
     # 过滤：排除包含摘要/英文版的报告
     if ('摘要' in announcement_title) or ('英文版' in announcement_title):

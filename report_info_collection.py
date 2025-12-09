@@ -48,6 +48,8 @@ def extract_data_by_category(pdf_content, pdf_url):
     parent_categories = ["存货", "无形资产", "开发支出"]
     # 用于去重的集合，记录已经找到的类别
     found_categories = set()
+    # 用于记录"其中：数据资源"的字典，key为父类别，value为提取的数值
+    new_data_asset_dict = {}
     
     def find_first_number_in_row(row, start_col=1):
         """
@@ -104,7 +106,7 @@ def extract_data_by_category(pdf_content, pdf_url):
                     for table in tables:
                         last_parent_item = None
                         # 遍历表格的每一行
-                        for row in table:
+                        for row_idx, row in enumerate(table):
                             if not row or not row[0]:  # 跳过空行或第一列为空的行
                                 continue
                             
@@ -144,10 +146,43 @@ def extract_data_by_category(pdf_content, pdf_url):
                                 found_categories.add(last_parent_item)
                                 # 重置父项，避免下一行的其他"其中"项被错误归类
                                 last_parent_item = None
+                            
+                            # 新增逻辑：查找"其中：数据资源"
+                            if "其中：数据资源" in first_col_text:
+                                # 确定它属于哪个父类别（通过检查前面的行）
+                                # 从当前行往前查找最近的父类别
+                                parent_for_new_data_asset = None
+                                
+                                # 往前查找，找到最近的父类别
+                                for i in range(row_idx - 1, -1, -1):
+                                    if i < len(table) and table[i] and table[i][0]:
+                                        prev_first_col = table[i][0].replace('\n', '')
+                                        for cat in parent_categories:
+                                            if cat in prev_first_col:
+                                                parent_for_new_data_asset = cat
+                                                break
+                                        if parent_for_new_data_asset:
+                                            break
+                                
+                                if parent_for_new_data_asset:
+                                    # 如果这个父类别还没有记录过，才记录
+                                    if parent_for_new_data_asset not in new_data_asset_dict:
+                                        found_value, has_number = find_first_number_in_row(row, start_col=1)
+                                        new_data_asset_dict[parent_for_new_data_asset] = found_value
+                                        if has_number:
+                                            print(f"    ✅ {parent_for_new_data_asset}其中：数据资源: {found_value}")
+                                        else:
+                                            print(f"    ⚠️ {parent_for_new_data_asset}其中：数据资源: 未检测到数字")
 
     except Exception as e:
         print(f"    ❌ 解析PDF表格时出错: {e}")
         return []
+    
+    # 为每个找到的项目添加 new_data_asset 字段
+    for item in found_items:
+        category = item['category']
+        # 如果该类别在 new_data_asset_dict 中有记录，则使用该值，否则为 "N/A"
+        item['new_data_asset'] = new_data_asset_dict.get(category, "N/A")
         
     if not found_items:
         print(f"    ⚠️ 在此PDF的任何表格中未找到'数据资源'相关条目。")
@@ -233,6 +268,7 @@ def process_pdf_link(row_data, session, headers, folder_path, download_pdf=True)
                 "项目名称": item['category'],
                 "金额": item['value'],
                 "是否包含数据资产": item['has_data'],
+                "new_data_asset": item.get('new_data_asset', "N/A"),
                 "PDF链接": pdf_url
             })
     else:
@@ -246,6 +282,7 @@ def process_pdf_link(row_data, session, headers, folder_path, download_pdf=True)
                 "项目名称": category,
                 "金额": "N/A",
                 "是否包含数据资产": 0,
+                "new_data_asset": "N/A",
                 "PDF链接": pdf_url
             })
             
@@ -370,7 +407,7 @@ def find_csv_file(csv_file_path=None):
 
 def pivot_to_wide_format(df_long):
     """
-    将长格式数据转换为宽格式，并添加"是否包含数据资产"列
+    将长格式数据转换为宽格式，并添加"是否包含数据资产"列和new_data_asset列
     
     Args:
         df_long (pd.DataFrame): 长格式数据
@@ -398,6 +435,35 @@ def pivot_to_wide_format(df_long):
     
     print("数据透视完成！")
     
+    # 创建new_data_asset透视表
+    if 'new_data_asset' in df_long_dedup.columns:
+        print("正在创建new_data_asset透视表...")
+        df_new_data_asset_pivot = df_long_dedup.pivot_table(
+            index=['证券代码', '公司名称', '报告名称', '报告日期', 'PDF链接'], 
+            columns='项目名称',                           
+            values='new_data_asset',                                
+            aggfunc='first'                               
+        ).reset_index()
+        
+        # 重命名new_data_asset的列，添加后缀
+        item_cols = ['存货', '无形资产', '开发支出']
+        rename_dict = {}
+        for col in item_cols:
+            if col in df_new_data_asset_pivot.columns:
+                rename_dict[col] = f"{col}_new_data_asset"
+        
+        if rename_dict:
+            df_new_data_asset_pivot = df_new_data_asset_pivot.rename(columns=rename_dict)
+            
+            # 合并到主透视表
+            merge_cols = ['证券代码', '公司名称', '报告名称', '报告日期', 'PDF链接']
+            df_pivot = df_pivot.merge(
+                df_new_data_asset_pivot[merge_cols + list(rename_dict.values())],
+                on=merge_cols,
+                how='left'
+            )
+            print("new_data_asset透视表合并完成！")
+    
     # 创建"是否包含数据资产"列
     # 检查三个项目（存货、无形资产、开发支出）是否有数据
     item_cols = ['存货', '无形资产', '开发支出']
@@ -419,12 +485,13 @@ def pivot_to_wide_format(df_long):
     
     df_pivot['是否包含数据资产'] = has_data_col
     
-    # 调整列顺序：基本信息 -> 金额列 -> 是否包含数据资产 -> PDF链接
+    # 调整列顺序：基本信息 -> 金额列 -> new_data_asset列 -> 是否包含数据资产 -> PDF链接
     base_cols = ['证券代码', '公司名称', '报告名称', '报告日期']
     amount_cols = [col for col in item_cols if col in df_pivot.columns]
+    new_data_asset_cols = [f"{col}_new_data_asset" for col in item_cols if f"{col}_new_data_asset" in df_pivot.columns]
     other_cols = ['是否包含数据资产', 'PDF链接']
     
-    final_columns = base_cols + amount_cols + other_cols
+    final_columns = base_cols + amount_cols + new_data_asset_cols + other_cols
     # 只保留存在的列
     final_columns = [col for col in final_columns if col in df_pivot.columns]
     
@@ -542,7 +609,10 @@ def main():
     if all_results_for_excel:
         # 生成长格式报告
         df_long = pd.DataFrame(all_results_for_excel)
-        df_long = df_long[['证券代码', '公司名称', '报告名称', '报告日期', '项目名称', '金额', '是否包含数据资产', 'PDF链接']]
+        # 确保包含所有必要的列
+        required_cols = ['证券代码', '公司名称', '报告名称', '报告日期', '项目名称', '金额', '是否包含数据资产', 'new_data_asset', 'PDF链接']
+        available_cols = [col for col in required_cols if col in df_long.columns]
+        df_long = df_long[available_cols]
         
         # 最终去重处理
         print("正在进行最终数据去重...")
