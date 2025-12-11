@@ -37,16 +37,18 @@ def extract_data_by_text(pdf_content, pdf_url):
     """
     方法1：通过文本搜索查找"其中：数据资源"，不依赖表格提取。
     找到后检查上一行的父类别，并提取数值。
+    同时检查PDF中是否包含"数据资源"这个词。
     
     Args:
         pdf_content (bytes): PDF文件的二进制内容
         pdf_url (str): PDF文件的URL（用于调试）
     
     Returns:
-        list: 包含提取数据的字典列表
+        tuple: (包含提取数据的字典列表, 是否包含"数据资源"关键词)
     """
     found_items = []
     parent_categories = ["存货", "无形资产", "开发支出"]
+    has_data_resource_keyword = False  # 标记是否在PDF中找到"数据资源"这个词
     
     def extract_number_from_text(text):
         """
@@ -104,6 +106,11 @@ def extract_data_by_text(pdf_content, pdf_url):
                 warnings.simplefilter("ignore")
                 with pdfplumber.open(BytesIO(pdf_content)) as pdf:
                     for page_num, page in enumerate(pdf.pages, 1):
+                        # 先检查整个页面是否包含"数据资源"（用于"是否包含数据资产"标记）
+                        page_text = page.extract_text() or ""
+                        if "数据资源" in page_text:
+                            has_data_resource_keyword = True
+                        
                         # 提取所有单词（带位置信息）
                         words = page.extract_words()
                         if not words:
@@ -196,7 +203,7 @@ def extract_data_by_text(pdf_content, pdf_url):
     if not found_items:
         print(f"    ⚠️ 在此PDF中未找到'其中：数据资源'相关条目。")
         
-    return found_items
+    return found_items, has_data_resource_keyword
 
 
 def extract_data_by_table(pdf_content, pdf_url):
@@ -387,26 +394,15 @@ def process_pdf_link(row_data, session, headers, folder_path, download_pdf=True)
     extracted_data_table = extract_data_by_table(pdf_content, pdf_url)
     
     print(f"  🔍 使用文本提取方法...")
-    extracted_data_text = extract_data_by_text(pdf_content, pdf_url)
+    extracted_data_text, has_data_resource_keyword = extract_data_by_text(pdf_content, pdf_url)
     
     # 合并两种方法的结果（不去重，保留所有数据）
     all_extracted_data = extracted_data_table + extracted_data_text
     print(f"  📊 表格方法找到: {len(extracted_data_table)} 条，文本方法找到: {len(extracted_data_text)} 条，总计: {len(all_extracted_data)} 条")
     
-    # 检查PDF中是否包含"数据资源"这个词（不管是否有数值）
-    has_data_resource_keyword = False
-    try:
-        # 提取PDF的所有文本内容进行简单搜索
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            with pdfplumber.open(BytesIO(pdf_content)) as pdf:
-                for page in pdf.pages:
-                    page_text = page.extract_text() or ""
-                    if "数据资源" in page_text:
-                        has_data_resource_keyword = True
-                        break
-    except:
-        # 如果提取失败，检查已提取的数据中是否有包含"数据资源"的（比如表格方法提取到的）
+    # 如果文本方法没有检测到"数据资源"，再检查表格方法提取的数据
+    if not has_data_resource_keyword:
+        # 检查已提取的数据中是否有包含"数据资源"的（比如表格方法提取到的）
         if all_extracted_data:
             has_data_resource_keyword = True
     
