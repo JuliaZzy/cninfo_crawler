@@ -33,9 +33,10 @@ warnings.filterwarnings("ignore", category=UserWarning, module="pdfplumber")
 logging.getLogger("pdfplumber").setLevel(logging.ERROR)
 
 
-def extract_data_by_category(pdf_content, pdf_url):
+def extract_data_by_text(pdf_content, pdf_url):
     """
-    通过解析PDF中的表格结构来提取数据，能够精确区分列，避免误抓。
+    方法1：通过文本搜索查找"其中：数据资源"，不依赖表格提取。
+    找到后检查上一行的父类别，并提取数值。
     
     Args:
         pdf_content (bytes): PDF文件的二进制内容
@@ -46,147 +47,275 @@ def extract_data_by_category(pdf_content, pdf_url):
     """
     found_items = []
     parent_categories = ["存货", "无形资产", "开发支出"]
-    # 用于去重的集合，记录已经找到的类别
-    found_categories = set()
-    # 用于记录"其中：数据资源"的字典，key为父类别，value为提取的数值
-    new_data_asset_dict = {}
     
-    def find_first_number_in_row(row, start_col=1):
+    def extract_number_from_text(text):
         """
-        在行的指定列开始位置查找第一个有效数字
+        从文本中提取第一个有效数字（保留千分位格式）
         
         Args:
-            row (list): 表格行数据
-            start_col (int): 开始查找的列索引
+            text (str): 文本内容
             
         Returns:
-            tuple: (找到的数字, 是否检测到数字)
+            tuple: (找到的数字字符串, 是否检测到数字, 数值是否大于0)
         """
-        has_number = False
-        found_value = "空值"
+        if not text:
+            return "空值", False, False
         
-        for i in range(start_col, len(row)):
-            cell_value = row[i]
-            if cell_value and isinstance(cell_value, str):
-                # 清理单元格内容，去除空格和特殊字符
-                cleaned_value = cell_value.strip().replace(' ', '')
-                
-                # 更宽松的数字匹配模式，包括各种格式
-                number_patterns = [
-                    r'((?:\d{1,3},)*\d{1,3}\.\d{2})',  # 标准格式：1,234.56
-                    r'((?:\d{1,3},)*\d+)',              # 整数格式：1,234
-                    r'(\d+\.\d{2})',                    # 简单小数：123.45
-                    r'(\d+)',                           # 纯数字：123
-                    r'(-)',                             # 负号或空值标记
-                ]
-                
-                for pattern in number_patterns:
-                    match = re.search(pattern, cleaned_value)
-                    if match:
-                        found_value = match.group(1)
-                        has_number = True
-                        break
-                
-                if has_number:
-                    break
+        # 清理文本，保留逗号（千分位）
+        cleaned_text = text.strip().replace(' ', '')
         
-        return found_value, has_number
+        # 数字匹配模式（按优先级排序，更精确的在前）
+        number_patterns = [
+            r'((?:\d{1,3},)*\d{1,3}\.\d{2})',  # 标准格式：1,234.56
+            r'((?:\d{1,3},)*\d{1,3}\.\d+)',    # 带小数点的格式：1,234.5 或 1,234.567
+            r'((?:\d{1,3},)+\d+)',             # 带千分位的整数：1,234,567
+            r'((?:\d{1,3},)*\d+)',              # 整数格式：1,234
+            r'(\d+\.\d{2})',                    # 简单小数：123.45
+            r'(\d+\.\d+)',                      # 带小数点的数字：123.5
+            r'(\d+)',                           # 纯数字：123（任何位数）
+        ]
+        
+        for pattern in number_patterns:
+            match = re.search(pattern, cleaned_text)
+            if match:
+                value_str = match.group(1)
+                # 转换为数值检查是否大于0
+                try:
+                    # 去除逗号后转换为浮点数
+                    numeric_value = float(value_str.replace(',', ''))
+                    is_positive = numeric_value > 0
+                    return value_str, True, is_positive
+                except:
+                    return value_str, True, True  # 如果转换失败，假设大于0
+        
+        return "空值", False, False
     
     try:
-        # 临时抑制pdfplumber的警告
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            with pdfplumber.open(BytesIO(pdf_content)) as pdf:
-                for page in pdf.pages:
-                    # 尝试提取页面上的所有表格
-                    tables = page.extract_tables()
-                    if not tables:
-                        continue
-
-                    for table in tables:
-                        last_parent_item = None
-                        # 遍历表格的每一行
-                        for row_idx, row in enumerate(table):
-                            if not row or not row[0]:  # 跳过空行或第一列为空的行
-                                continue
+        # 临时抑制pdfplumber的警告和错误输出
+        import sys
+        from io import StringIO
+        
+        # 捕获stderr以抑制pdfplumber的警告
+        old_stderr = sys.stderr
+        sys.stderr = StringIO()
+        
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                with pdfplumber.open(BytesIO(pdf_content)) as pdf:
+                    for page_num, page in enumerate(pdf.pages, 1):
+                        # 提取所有单词（带位置信息）
+                        words = page.extract_words()
+                        if not words:
+                            continue
+                        
+                        # 按行组织单词（通过y坐标分组）
+                        # 将y坐标相近的单词归为同一行
+                        lines = {}
+                        for word in words:
+                            # 使用y坐标的整数部分作为行标识
+                            y_key = round(word['top'])
+                            if y_key not in lines:
+                                lines[y_key] = []
+                            lines[y_key].append(word)
+                        
+                        # 按y坐标从大到小排序（从上到下）
+                        sorted_lines = sorted(lines.items(), key=lambda x: x[0], reverse=True)
+                        
+                        # 查找包含"其中：数据资源"的行（使用正则匹配，允许冒号变体和空格）
+                        # 匹配模式：其中 + 冒号（中文/英文/全角） + 可选空格 + 数据资源
+                        target_pattern = re.compile(r'其中[：:：]\s*数据资源')
+                        
+                        for line_idx, (y_pos, line_words) in enumerate(sorted_lines):
+                            # 检查这一行是否包含目标文本（先拼接完整行文本，也检查单个单词的组合）
+                            line_text = ' '.join([w['text'] for w in line_words])
                             
-                            # 清理第一列的文本，去除换行符
-                            first_col_text = row[0].replace('\n', '')
-
-                            # 步骤1: 检查是否为父项
-                            is_parent = False
-                            for cat in parent_categories:
-                                if cat in first_col_text:
-                                    last_parent_item = cat
-                                    is_parent = True
-                                    break
-                            if is_parent:
-                                continue # 如果是父项行，继续检查下一行
-
-                            # 步骤2: 检查是否为子项，并且我们已经找到了它的父项
-                            if last_parent_item and "数据资源" in first_col_text:
-                                # 去重检查：如果这个类别已经找到过，跳过
-                                if last_parent_item in found_categories:
-                                    continue
-                                    
-                                # 步骤3: 智能查找数字位置
-                                found_value, has_number = find_first_number_in_row(row, start_col=1)
-                                
-                                if has_number:
-                                    print(f"    ✅ {last_parent_item}数据资源: {found_value}")
-                                else:
-                                    print(f"    ⚠️ {last_parent_item}数据资源: 未检测到数字")
-
-                                found_items.append({
-                                    "category": last_parent_item,
-                                    "value": found_value,
-                                    "has_data": 1 if has_number and found_value != "空值" and found_value != "-" else 0
-                                })
-                                # 记录已找到的类别，避免重复
-                                found_categories.add(last_parent_item)
-                                # 重置父项，避免下一行的其他"其中"项被错误归类
-                                last_parent_item = None
+                            # 也检查去除空格后的文本（防止空格干扰）
+                            line_text_no_space = line_text.replace(' ', '').replace('　', '')  # 去除普通空格和全角空格
                             
-                            # 新增逻辑：查找"其中：数据资源"
-                            if "其中：数据资源" in first_col_text:
-                                # 确定它属于哪个父类别（通过检查前面的行）
-                                # 从当前行往前查找最近的父类别
-                                parent_for_new_data_asset = None
+                            # 使用正则表达式匹配"其中：数据资源"（允许冒号变体和空格）
+                            if target_pattern.search(line_text) or target_pattern.search(line_text_no_space):
+                                # 在这一行中查找第一个大于0的数值
+                                found_value = "空值"
+                                has_number = False
+                                found_zero_value = False
                                 
-                                # 往前查找，找到最近的父类别
-                                for i in range(row_idx - 1, -1, -1):
-                                    if i < len(table) and table[i] and table[i][0]:
-                                        prev_first_col = table[i][0].replace('\n', '')
-                                        for cat in parent_categories:
-                                            if cat in prev_first_col:
-                                                parent_for_new_data_asset = cat
-                                                break
-                                        if parent_for_new_data_asset:
+                                # 在同一行的所有单词中查找数值
+                                for word in line_words:
+                                    value, has_num, is_positive = extract_number_from_text(word['text'])
+                                    if has_num and value != "空值":
+                                        if is_positive:
+                                            found_value = value
+                                            has_number = True
                                             break
-                                
-                                if parent_for_new_data_asset:
-                                    # 如果这个父类别还没有记录过，才记录
-                                    if parent_for_new_data_asset not in new_data_asset_dict:
-                                        found_value, has_number = find_first_number_in_row(row, start_col=1)
-                                        new_data_asset_dict[parent_for_new_data_asset] = found_value
-                                        if has_number:
-                                            print(f"    ✅ {parent_for_new_data_asset}其中：数据资源: {found_value}")
                                         else:
-                                            print(f"    ⚠️ {parent_for_new_data_asset}其中：数据资源: 未检测到数字")
-
+                                            # 找到了数值但是为0
+                                            found_zero_value = True
+                                
+                                # 如果找到数值为0，跳过
+                                if found_zero_value and not has_number:
+                                    continue
+                                
+                                # 如果找到数值且数值大于0，向上查找父类别
+                                if has_number and found_value != "空值":
+                                    parent_category = None
+                                    
+                                    # 向上查找父类别（检查上面的行）
+                                    # sorted_lines是按y从大到小排序（从上到下），所以上一行是line_idx-1
+                                    # 向上查找最多2行
+                                    for prev_line_idx in range(max(0, line_idx - 2), line_idx):
+                                        prev_y_pos, prev_line_words = sorted_lines[prev_line_idx]
+                                        prev_line_text = ' '.join([w['text'] for w in prev_line_words])
+                                        
+                                        for cat in parent_categories:
+                                            if cat in prev_line_text:
+                                                parent_category = cat
+                                                break
+                                        
+                                        if parent_category:
+                                            break
+                                    
+                                    # 如果找到父类别，添加到结果
+                                    if parent_category:
+                                        found_items.append({
+                                            "category": parent_category,
+                                            "value": found_value,
+                                            "method": "text"  # 标记来源
+                                        })
+                                        print(f"    ✅ [文本] 第{page_num}页 {parent_category}其中：数据资源: {found_value}")
+        finally:
+            # 恢复stderr
+            sys.stderr = old_stderr
+            
     except Exception as e:
-        print(f"    ❌ 解析PDF表格时出错: {e}")
+        print(f"    ❌ 解析PDF时出错: {e}")
+        import traceback
+        traceback.print_exc()
         return []
-    
-    # 为每个找到的项目添加 new_data_asset 字段
-    for item in found_items:
-        category = item['category']
-        # 如果该类别在 new_data_asset_dict 中有记录，则使用该值，否则为 "N/A"
-        item['new_data_asset'] = new_data_asset_dict.get(category, "N/A")
         
     if not found_items:
-        print(f"    ⚠️ 在此PDF的任何表格中未找到'数据资源'相关条目。")
+        print(f"    ⚠️ 在此PDF中未找到'其中：数据资源'相关条目。")
         
+    return found_items
+
+
+def extract_data_by_table(pdf_content, pdf_url):
+    """
+    方法2：通过表格提取查找"其中：数据资源"。
+    找到后检查上一行的父类别，并提取数值。
+    
+    Args:
+        pdf_content (bytes): PDF文件的二进制内容
+        pdf_url (str): PDF文件的URL（用于调试）
+    
+    Returns:
+        list: 包含提取数据的字典列表
+    """
+    found_items = []
+    parent_categories = ["存货", "无形资产", "开发支出"]
+    
+    def extract_number_from_text(text):
+        """从文本中提取第一个有效数字"""
+        if not text:
+            return "空值", False, False
+        
+        cleaned_text = text.strip().replace(' ', '')
+        
+        # 数字匹配模式（按优先级排序，更精确的在前）
+        number_patterns = [
+            r'((?:\d{1,3},)*\d{1,3}\.\d{2})',  # 标准格式：1,234.56
+            r'((?:\d{1,3},)*\d{1,3}\.\d+)',    # 带小数点的格式：1,234.5 或 1,234.567
+            r'((?:\d{1,3},)+\d+)',             # 带千分位的整数：1,234,567
+            r'((?:\d{1,3},)*\d+)',              # 整数格式：1,234
+            r'(\d+\.\d{2})',                    # 简单小数：123.45
+            r'(\d+\.\d+)',                      # 带小数点的数字：123.5
+            r'(\d+)',                           # 纯数字：123（任何位数）
+        ]
+        
+        for pattern in number_patterns:
+            match = re.search(pattern, cleaned_text)
+            if match:
+                value_str = match.group(1)
+                try:
+                    numeric_value = float(value_str.replace(',', ''))
+                    is_positive = numeric_value > 0
+                    return value_str, True, is_positive
+                except:
+                    return value_str, True, True
+        
+        return "空值", False, False
+    
+    try:
+        # 临时抑制pdfplumber的警告和错误输出
+        import sys
+        from io import StringIO
+        
+        # 捕获stderr以抑制pdfplumber的警告
+        old_stderr = sys.stderr
+        sys.stderr = StringIO()
+        
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                with pdfplumber.open(BytesIO(pdf_content)) as pdf:
+                    for page_num, page in enumerate(pdf.pages, 1):
+                        tables = page.extract_tables()
+                        if not tables:
+                            continue
+                        
+                        for table in tables:
+                            for row_idx, row in enumerate(table):
+                                if not row or not row[0]:
+                                    continue
+                                
+                                first_col_text = row[0].replace('\n', '') if row[0] else ''
+                                first_col_no_space = first_col_text.replace(' ', '').replace('　', '')
+                                
+                                # 查找"其中：数据资源"（使用正则匹配，允许冒号变体和空格）
+                                target_pattern = re.compile(r'其中[：:：]\s*数据资源')
+                                
+                                if target_pattern.search(first_col_text) or target_pattern.search(first_col_no_space):
+                                    found_value = "空值"
+                                    has_number = False
+                                    
+                                    # 从第1列开始查找数值（只在同一行查找）
+                                    for i in range(1, len(row)):
+                                        if row[i]:
+                                            value, has_num, is_positive = extract_number_from_text(str(row[i]))
+                                            if has_num and value != "空值" and is_positive:
+                                                found_value = value
+                                                has_number = True
+                                                break
+                                    
+                                    if has_number and found_value != "空值":
+                                        # 向上查找父类别（检查上面的行）
+                                        # 向上查找最多2行
+                                        parent_category = None
+                                        for i in range(max(0, row_idx - 2), row_idx):
+                                            if i >= 0 and table[i] and table[i][0]:
+                                                prev_first_col = str(table[i][0]).replace('\n', '')
+                                                for cat in parent_categories:
+                                                    if cat in prev_first_col:
+                                                        parent_category = cat
+                                                        break
+                                                if parent_category:
+                                                    break
+                                        
+                                        if parent_category:
+                                            found_items.append({
+                                                "category": parent_category,
+                                                "value": found_value,
+                                                "method": "table"  # 标记来源
+                                            })
+                                            print(f"    ✅ [表格] 第{page_num}页 {parent_category}其中：数据资源: {found_value}")
+        finally:
+            # 恢复stderr
+            sys.stderr = old_stderr
+    
+    except Exception as e:
+        print(f"    ⚠️ 表格提取方法出错: {e}")
+        return []
+    
     return found_items
 
 
@@ -253,13 +382,38 @@ def process_pdf_link(row_data, session, headers, folder_path, download_pdf=True)
             print(f"  ❌ 下载失败: {e}")
             return []
 
-    # 在内存中解析PDF内容
-    extracted_data = extract_data_by_category(pdf_content, pdf_url)
+    # 在内存中解析PDF内容 - 使用两种方法
+    print(f"  🔍 使用表格提取方法...")
+    extracted_data_table = extract_data_by_table(pdf_content, pdf_url)
+    
+    print(f"  🔍 使用文本提取方法...")
+    extracted_data_text = extract_data_by_text(pdf_content, pdf_url)
+    
+    # 合并两种方法的结果（不去重，保留所有数据）
+    all_extracted_data = extracted_data_table + extracted_data_text
+    print(f"  📊 表格方法找到: {len(extracted_data_table)} 条，文本方法找到: {len(extracted_data_text)} 条，总计: {len(all_extracted_data)} 条")
+    
+    # 检查PDF中是否包含"数据资源"这个词（不管是否有数值）
+    has_data_resource_keyword = False
+    try:
+        # 提取PDF的所有文本内容进行简单搜索
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with pdfplumber.open(BytesIO(pdf_content)) as pdf:
+                for page in pdf.pages:
+                    page_text = page.extract_text() or ""
+                    if "数据资源" in page_text:
+                        has_data_resource_keyword = True
+                        break
+    except:
+        # 如果提取失败，检查已提取的数据中是否有包含"数据资源"的（比如表格方法提取到的）
+        if all_extracted_data:
+            has_data_resource_keyword = True
     
     # 将报告自身信息添加到提取结果中
     results_for_excel = []
-    if extracted_data:
-        for item in extracted_data:
+    if all_extracted_data:
+        for item in all_extracted_data:
             results_for_excel.append({
                 "证券代码": sec_code,
                 "公司名称": sec_name,
@@ -267,12 +421,11 @@ def process_pdf_link(row_data, session, headers, folder_path, download_pdf=True)
                 "报告日期": report_date,
                 "项目名称": item['category'],
                 "金额": item['value'],
-                "是否包含数据资产": item['has_data'],
-                "new_data_asset": item.get('new_data_asset', "N/A"),
-                "PDF链接": pdf_url
+                "PDF链接": pdf_url,
+                "_has_data_resource": 1 if has_data_resource_keyword else 0  # 临时字段，用于后续判断
             })
     else:
-        # 即使没找到数据，也记录三条（对应三个项目），方便追溯
+        # 即使没找到数据，也记录三条（对应三个项目），方便追溯，金额设为0
         for category in ["存货", "无形资产", "开发支出"]:
             results_for_excel.append({
                 "证券代码": sec_code,
@@ -280,10 +433,9 @@ def process_pdf_link(row_data, session, headers, folder_path, download_pdf=True)
                 "报告名称": report_title,
                 "报告日期": report_date,
                 "项目名称": category,
-                "金额": "N/A",
-                "是否包含数据资产": 0,
-                "new_data_asset": "N/A",
-                "PDF链接": pdf_url
+                "金额": "0",
+                "PDF链接": pdf_url,
+                "_has_data_resource": 1 if has_data_resource_keyword else 0  # 临时字段，用于后续判断
             })
             
     return results_for_excel
@@ -407,7 +559,11 @@ def find_csv_file(csv_file_path=None):
 
 def pivot_to_wide_format(df_long):
     """
-    将长格式数据转换为宽格式，并添加"是否包含数据资产"列和new_data_asset列
+    将长格式数据转换为宽格式，并添加"是否包含数据资产"列
+    去重逻辑：
+    1. 同一个证券代码下的存货/无形资产/开发支出，优先取大于0的值
+    2. 如果有多个值且相等，取第一个
+    3. 如果有多个值且不相等，取第一个大于0的（如果都没有大于0的，取第一个）
     
     Args:
         df_long (pd.DataFrame): 长格式数据
@@ -417,12 +573,48 @@ def pivot_to_wide_format(df_long):
     """
     print("\n正在进行数据透视操作...")
     
-    # 先对数据进行去重
-    print("正在去除重复数据...")
-    df_long_dedup = df_long.drop_duplicates(
-        subset=['公司名称', '报告名称', '报告日期', '项目名称'], 
-        keep='first'
-    )
+    # 去重逻辑：按证券代码和项目名称分组，优先选择大于0的值
+    print("正在按规则去重...")
+    
+    def get_numeric_value(val):
+        """将值转换为数值，用于比较"""
+        if pd.isna(val):
+            return 0
+        try:
+            val_str = str(val).strip().replace(',', '').replace(' ', '')
+            if val_str in ['N/A', '空值', '-', 'nan', 'None', '0', '']:
+                return 0
+            return float(val_str)
+        except:
+            return 0
+    
+    # 按证券代码、公司名称、报告名称、报告日期、PDF链接、项目名称分组
+    deduplicated_rows = []
+    
+    grouped = df_long.groupby(['证券代码', '公司名称', '报告名称', '报告日期', 'PDF链接', '项目名称'])
+    
+    for (sec_code, company, report, date, pdf_link, category), group in grouped:
+        if len(group) == 1:
+            # 只有一条记录，直接添加
+            deduplicated_rows.append(group.iloc[0].to_dict())
+        else:
+            # 多条记录，按规则选择
+            group = group.copy()
+            group['_numeric_value'] = group['金额'].apply(get_numeric_value)
+            
+            # 优先选择大于0的值
+            positive_rows = group[group['_numeric_value'] > 0]
+            
+            if len(positive_rows) > 0:
+                # 如果有大于0的值，选择第一个
+                selected_row = positive_rows.iloc[0]
+            else:
+                # 如果没有大于0的值，选择第一个
+                selected_row = group.iloc[0]
+            
+            deduplicated_rows.append(selected_row.drop('_numeric_value').to_dict())
+    
+    df_long_dedup = pd.DataFrame(deduplicated_rows)
     print(f"去重前: {len(df_long)} 行，去重后: {len(df_long_dedup)} 行")
     
     # 创建金额透视表
@@ -435,63 +627,48 @@ def pivot_to_wide_format(df_long):
     
     print("数据透视完成！")
     
-    # 创建new_data_asset透视表
-    if 'new_data_asset' in df_long_dedup.columns:
-        print("正在创建new_data_asset透视表...")
-        df_new_data_asset_pivot = df_long_dedup.pivot_table(
-            index=['证券代码', '公司名称', '报告名称', '报告日期', 'PDF链接'], 
-            columns='项目名称',                           
-            values='new_data_asset',                                
-            aggfunc='first'                               
-        ).reset_index()
-        
-        # 重命名new_data_asset的列，添加后缀
-        item_cols = ['存货', '无形资产', '开发支出']
-        rename_dict = {}
-        for col in item_cols:
-            if col in df_new_data_asset_pivot.columns:
-                rename_dict[col] = f"{col}_new_data_asset"
-        
-        if rename_dict:
-            df_new_data_asset_pivot = df_new_data_asset_pivot.rename(columns=rename_dict)
-            
-            # 合并到主透视表
-            merge_cols = ['证券代码', '公司名称', '报告名称', '报告日期', 'PDF链接']
-            df_pivot = df_pivot.merge(
-                df_new_data_asset_pivot[merge_cols + list(rename_dict.values())],
-                on=merge_cols,
-                how='left'
-            )
-            print("new_data_asset透视表合并完成！")
-    
     # 创建"是否包含数据资产"列
-    # 检查三个项目（存货、无形资产、开发支出）是否有数据
-    item_cols = ['存货', '无形资产', '开发支出']
+    # 新逻辑：只要PDF中有"数据资源"这个词，就设为1
+    # 从原始长格式数据中获取每个PDF的标记
     has_data_col = []
+    item_cols = ['存货', '无形资产', '开发支出']  # 定义项目列，用于后续数据清理
     
+    # 为每个PDF链接创建一个标记字典
+    pdf_has_data_resource = {}
+    if '_has_data_resource' in df_long_dedup.columns:
+        for pdf_link in df_long_dedup['PDF链接'].unique():
+            pdf_rows = df_long_dedup[df_long_dedup['PDF链接'] == pdf_link]
+            if len(pdf_rows) > 0:
+                # 取第一条记录的标记（所有记录的标记应该相同）
+                pdf_has_data_resource[pdf_link] = int(pdf_rows.iloc[0]['_has_data_resource'])
+            else:
+                pdf_has_data_resource[pdf_link] = 0
+    else:
+        # 如果临时字段不存在，默认都是0（不应该发生）
+        for pdf_link in df_pivot['PDF链接'].unique():
+            pdf_has_data_resource[pdf_link] = 0
+    
+    # 根据PDF链接设置"是否包含数据资产"
     for idx, row in df_pivot.iterrows():
-        has_data = 0
-        for col in item_cols:
-            if col in df_pivot.columns:
-                value = row[col]
-                # 检查值是否有效（不是N/A、空值、-等）
-                if pd.notna(value) and str(value) not in ['N/A', '空值', '-', 'nan', 'None']:
-                    # 尝试提取数字
-                    value_str = str(value).replace(',', '').replace(' ', '')
-                    if re.search(r'\d', value_str):
-                        has_data = 1
-                        break
+        pdf_link = row['PDF链接']
+        has_data = pdf_has_data_resource.get(pdf_link, 0)
         has_data_col.append(has_data)
     
     df_pivot['是否包含数据资产'] = has_data_col
     
-    # 调整列顺序：基本信息 -> 金额列 -> new_data_asset列 -> 是否包含数据资产 -> PDF链接
+    # 将所有空值、N/A等替换为0
+    print("正在清理数据：将空值、N/A等替换为0...")
+    for col in item_cols:
+        if col in df_pivot.columns:
+            df_pivot[col] = df_pivot[col].replace(['N/A', '空值', '-', 'nan', 'None', ''], '0')
+            df_pivot[col] = df_pivot[col].fillna('0')
+    
+    # 调整列顺序：基本信息 -> 金额列 -> 是否包含数据资产 -> PDF链接
     base_cols = ['证券代码', '公司名称', '报告名称', '报告日期']
     amount_cols = [col for col in item_cols if col in df_pivot.columns]
-    new_data_asset_cols = [f"{col}_new_data_asset" for col in item_cols if f"{col}_new_data_asset" in df_pivot.columns]
     other_cols = ['是否包含数据资产', 'PDF链接']
     
-    final_columns = base_cols + amount_cols + new_data_asset_cols + other_cols
+    final_columns = base_cols + amount_cols + other_cols
     # 只保留存在的列
     final_columns = [col for col in final_columns if col in df_pivot.columns]
     
@@ -602,24 +779,35 @@ def main():
     # 显示统计信息
     print(f"\n🎯 处理完成统计:")
     print(f"  📊 总记录数: {len(df_csv)}")
-    print(f"  ✅ 成功提取数据: {len([r for r in all_results_for_excel if r.get('金额') != 'N/A'])}")
+    # 统计成功提取的数据（金额大于0的记录数）
+    success_count = 0
+    for r in all_results_for_excel:
+        amount = r.get('金额', '0')
+        if amount and str(amount) not in ['0', 'N/A', '空值', '-', 'nan', 'None', '']:
+            try:
+                if float(str(amount).replace(',', '')) > 0:
+                    success_count += 1
+            except:
+                pass
+    print(f"  ✅ 成功提取数据（金额>0）: {success_count}")
     
     # 生成最终的Excel报告
     print("\n===== 正在生成Excel报告... =====")
     if all_results_for_excel:
         # 生成长格式报告
         df_long = pd.DataFrame(all_results_for_excel)
-        # 确保包含所有必要的列
-        required_cols = ['证券代码', '公司名称', '报告名称', '报告日期', '项目名称', '金额', '是否包含数据资产', 'new_data_asset', 'PDF链接']
+        # 确保包含所有必要的列（不去重，保留所有数据）
+        # 注意：必须保留_has_data_resource字段，供pivot_to_wide_format使用
+        required_cols = ['证券代码', '公司名称', '报告名称', '报告日期', '项目名称', '金额', 'PDF链接']
+        if '_has_data_resource' in df_long.columns:
+            required_cols.append('_has_data_resource')
         available_cols = [col for col in required_cols if col in df_long.columns]
         df_long = df_long[available_cols]
         
-        # 最终去重处理
-        print("正在进行最终数据去重...")
-        original_count = len(df_long)
-        df_long = df_long.drop_duplicates(subset=['公司名称', '报告名称', '项目名称'], keep='first')
-        final_count = len(df_long)
-        print(f"去重前: {original_count} 行，去重后: {final_count} 行，去除了 {original_count - final_count} 行重复数据")
+        # 将所有空值、N/A等替换为0（长格式保留所有数据，不去重）
+        print("正在清理数据：将空值、N/A等替换为0...")
+        df_long['金额'] = df_long['金额'].replace(['N/A', '空值', '-', 'nan', 'None', ''], '0')
+        df_long['金额'] = df_long['金额'].fillna('0')
         
         # 生成输出文件名
         # 使用当前时间作为timestamp
